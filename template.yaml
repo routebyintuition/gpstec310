@@ -1,0 +1,435 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Unicorn Rentals Reservation Lookup SAM
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+  LambdaZipFile:
+    Description: Lambda source file that you must have copied to a local regional S3 bucket
+    Type: String
+    Default: !Ref LambdaZipFile
+  VpcCIDR: 
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.11.0/24
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.21.0/24
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.192.22.0/24
+  DBNAME:
+    Description: Database name of MySQL server being created.
+    Type: String
+    Default: UnicornDB
+  DBTABLE:
+    Description: Database table name on MySQL server
+    Type: String
+    Default: reservations
+  DBUSER:
+    Description: Database access username for application.
+    Type: String
+    Default: UnicornApp
+  DBPASS:
+    Description: Database access password for application.
+    Type: String
+    Default: UnicornPasswordDatabase
+  DOWNLOADURL:
+    Description: Initial reservation data used to populate table (no need to change)
+    Type: String
+    Default: https://s3-us-west-2.amazonaws.com/pub-materials/reservation-data.txt
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ2)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ2)
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ1)
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ2)
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+  NoIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "no-ingress-sg"
+      GroupDescription: "Security group with no ingress rule"
+      VpcId: !Ref VPC
+  MySQLEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MySQL TCP 3306 VPC CIDR
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3306'
+        ToPort: '3306'
+        CidrIp: !Ref VpcCIDR     
+  UnicornDBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupDescription: UnicornDb Subnet Group
+      DBSubnetGroupName: UnicornDbSG
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: UnicornDB Subnet Group
+  UnicornDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName:
+        Ref: DBNAME
+      VPCSecurityGroups:
+      - Ref: MySQLEC2SecurityGroup
+      DBSubnetGroupName: !Ref UnicornDBSubnetGroup
+      AllocatedStorage: '5'
+      DBInstanceClass: db.t2.micro
+      Engine: MySQL
+      MasterUsername: 
+        Ref: DBUSER
+      MasterUserPassword:
+        Ref: DBPASS
+    DeletionPolicy: Snapshot
+  DbUserSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqluser
+      Type: String
+      Value: !Ref DBUSER
+  DbPassSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqlpass
+      Type: String
+      Value: !Ref DBPASS
+  DbPortSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqlport
+      Type: String
+      Value: !GetAtt UnicornDB.Endpoint.Port
+  DbNameSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqldb
+      Type: String
+      Value: !Ref DBNAME 
+  DbTableSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqltable
+      Type: String
+      Value: !Ref DBTABLE
+  DbHostSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/mysqlhost
+      Type: String
+      Value: !GetAtt UnicornDB.Endpoint.Address
+  DownloadURLSsmParam:
+    Type: "AWS::SSM::Parameter"
+    Properties: 
+      Name: /prod/unicorndb/downloadurl
+      Type: String
+      Value: !Ref DOWNLOADURL
+  ApiGatewayApi:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      StageName: prod
+      Cors: '''*'''
+      DefinitionBody:
+        swagger: '2.0'
+        basePath: '/prod'
+        info:
+          title: unicorn-reservations
+        schemes:
+        - https
+        paths:
+          '/lookup':
+            post:
+              produces:
+              - 'application/json'
+              responses:
+                '200':
+                  description: '200 response'
+                  schema:
+                    $ref: '#/definitions/Empty'
+              x-amazon-apigateway-request-validator: basic # enable validation for this resource
+              x-amazon-apigateway-integration: # this section connect the Lambda function with the API Gateway
+                httpMethod: POST
+                type: 'aws_proxy'
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations                
+                passthroughBehavior: when_no_match
+
+  LambdaInvocation:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - LambdaFunction
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Join:
+        - ''
+        - - 'arn:aws:execute-api:'
+          - Ref: AWS::Region
+          - ":"
+          - Ref: AWS::AccountId
+          - ":"
+          - Ref: ApiGatewayApi
+          - "/*/*/*"
+
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Policies: 
+        - 
+          PolicyName: "getSsmParamLambda"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: "Allow"
+                Action: 
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                Resource: "*"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+  LambdaFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      AutoPublishAlias: live
+      CodeUri: s3://github-gpstec310/lambda/lookup.zip
+      Handler: lookup
+      Runtime: go1.x
+      Role:
+        'Fn::GetAtt':
+          - LambdaRole
+          - Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref NoIngressSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Environment:
+        Variables:
+          UNICORN_MYSQLDB: /prod/unicorndb/mysqldb
+          UNICORN_MYSQLHOST: /prod/unicorndb/mysqlhost
+          UNICORN_MYSQLPASS: /prod/unicorndb/mysqlpass
+          UNICORN_MYSQLPORT: /prod/unicorndb/mysqlport
+          UNICORN_MYSQLUSER: /prod/unicorndb/mysqluser
+          UNICORN_MYSQLTABLE: /prod/unicorndb/mysqltable
+          DOWNLOAD_URL: /prod/unicorndb/downloadurl
+      Events:
+        ProxyApiRoot:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGatewayApi
+            Path: /
+            Method: ANY
+        ProxyApiGreedy:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ApiGatewayApi
+            Path: /lookup
+            Method: POST
+      Description: 'Unicorn Rentals Reservation Lookup'
+      MemorySize: 256
+      Timeout: 60
+Outputs:
+  ApiLookupUrl:
+    Description: URL of your reservation lookup API endpoint
+    Value:
+      'Fn::Join':
+        - ''
+        - - 'https://'
+          - Ref: ApiGatewayApi
+          - .execute-api.
+          - Ref: 'AWS::Region'
+          - .amazonaws.com/prod/lookup
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [ ",", [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]]
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: A reference to the private subnet in the 2nd Availability Zone
+    Value: !Ref PrivateSubnet2
+
+  NoIngressSecurityGroup:
+    Description: Security group with no ingress rule
+    Value: !Ref NoIngressSecurityGroup
+    
+  DatabaseHost:
+    Description: Hostname of database server
+    Value: !GetAtt UnicornDB.Endpoint.Address
+    
+  DatabasePort:
+    Description: TCP port of database server
+    Value: !GetAtt UnicornDB.Endpoint.Port
